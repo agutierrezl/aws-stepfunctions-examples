@@ -1,0 +1,162 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "Pass",
+  "States": {
+    "Pass": {
+      "Type": "Pass",
+      "Next": "Parallel",
+      "ResultPath": "$.video",
+      "Parameters": {
+        "uuid.$": "States.UUID()"
+      }
+    },
+    "Parallel": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "StartTranscriptionJob",
+          "States": {
+            "StartTranscriptionJob": {
+              "Type": "Task",
+              "Parameters": {
+                "Media": {
+                  "MediaFileUri.$": "States.Format('s3://{}/{}', $.Input.Bucket, $.Input.Key)"
+                },
+                "TranscriptionJobName.$": "$.video.uuid",
+                "IdentifyLanguage": true,
+                "Subtitles": {
+                  "Formats": [
+                    "srt"
+                  ],
+                  "OutputStartIndex": 1
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+              "Next": "Wait for transcription"
+            },
+            "Wait for transcription": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "GetTranscriptionJob"
+            },
+            "GetTranscriptionJob": {
+              "Type": "Task",
+              "Parameters": {
+                "TranscriptionJobName.$": "$.TranscriptionJob.TranscriptionJobName"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+              "Next": "Transcription Finished?"
+            },
+            "Transcription Finished?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.TranscriptionJob.TranscriptionJobStatus",
+                  "StringEquals": "COMPLETED",
+                  "Next": "Successful Transcription"
+                },
+                {
+                  "Variable": "$.TranscriptionJob.TranscriptionJobStatus",
+                  "StringEquals": "FAIL",
+                  "Next": "Failed Transcription"
+                }
+              ],
+              "Default": "Wait for transcription"
+            },
+            "Successful Transcription": {
+              "Type": "Pass",
+              "Next": "Bedrock InvokeModel"
+            },
+            "Bedrock InvokeModel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::bedrock:invokeModel",
+              "Parameters": {
+                "ModelId": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+                "Body": {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 1024,
+                  "system": "You are Claude, an AI assistant created by Anthropic to be helpful. 
+                  Your goal is to provide text summaries from video transcriptions, 
+                  that will be use in the description fields of the videos in the Internet.",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Summarize the following video transcript for me in less than 100 words:"
+                        },
+                        {
+                          "type": "text",
+                          "text": "content text"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "Next": "Add Bedrock for summarization and labelling"
+            },
+            "Add Bedrock for summarization and labelling": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Failed Transcription": {
+              "Type": "Fail"
+            }
+          }
+        },
+        {
+          "StartAt": "MediaConvert CreateJob",
+          "States": {
+            "MediaConvert CreateJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::mediaconvert:createJob.sync",
+              "Parameters": {
+                "Queue": "arn:aws:mediaconvert:${REGION}:${AWS_ACCOUNT_ID}:queues/Default",
+                "UserMetadata": {},
+                "Role": "${MEDIACONVERT_ROLE}",
+                "Settings": {
+                  "Inputs": [
+                    {
+                      "AudioSelectors": {
+                        "Audio Selector 1": {
+                          "DefaultSelection": "DEFAULT"
+                        }
+                      },
+                      "VideoSelector": {},
+                      "TimecodeSource": "ZEROBASED",
+                      "FileInput.$": "States.Format('s3://{}/{}', $.Input.Bucket, $.Input.Key)"
+                    }
+                  ],
+                  "OutputGroups": [
+                    {
+                      "Name": "Apple HLS",
+                      "Outputs": [
+                        {
+                          "Preset": "System-Ott_Hls_Ts_Avc_Aac_16x9_1280x720p_30Hz_5.0Mbps",
+                          "NameModifier": "test"
+                        }
+                      ],
+                      "OutputGroupSettings": {
+                        "Type": "HLS_GROUP_SETTINGS",
+                        "HlsGroupSettings": {
+                          "SegmentLength": 10,
+                          "Destination.$": "States.Format('s3://{}/output/{}', $.Output.Bucket, $.video.uuid)",
+                          "MinSegmentLength": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "ResultPath": null,
+              "End": true
+            }
+          }
+        }
+      ],
+      "End": true
+    }
+  }
+}
